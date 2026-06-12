@@ -18,6 +18,7 @@ from eigenflip.encoders.eigenflip_solve import EigenFlipSolve
 from eigenflip.encoders.dense_reference import DenseGPTQ
 from eigenflip.encoders.shrinkage import ShrinkageGPTQ
 from eigenflip.encoders.tfic import TFICEncoder
+from eigenflip.encoders.tfic_fast import TFICEncoder as TFICEncoderFast
 from eigenflip.quantization.awq_scales import scales_from_awq_run
 
 try:
@@ -29,8 +30,8 @@ except ImportError:
 NEED_H = {"none": False, "clc": False,
           "eigenflip": True, "eigenflip_solve": True,
           "gptq": True, "shr_gptq_cov": True, "shr_gptq_2m": True,
-          "tfic": True}
-KEEP_SIGMA = {"gptq", "shr_gptq_cov", "shr_gptq_2m", "tfic"}
+          "tfic": True, "tfic_fast": True}
+KEEP_SIGMA = {"gptq", "shr_gptq_cov", "shr_gptq_2m", "tfic", "tfic_fast"}
 
 
 def build_encoder(name, args):
@@ -46,6 +47,11 @@ def build_encoder(name, args):
         gamma_th=args.tfic_gamma, kappa=args.tfic_kappa, gmax=args.tfic_gmax,
         n_stages=args.tfic_stages, sweeps=args.tfic_sweeps,
         c_cand=args.tfic_ccand, top_m=args.tfic_topm)
+    if name == "tfic_fast": return TFICEncoderFast(
+        alpha=args.tfic_alpha, beta=args.tfic_beta, eta=args.tfic_eta,
+        gamma_th=args.tfic_gamma, kappa=args.tfic_kappa, gmax=args.tfic_gmax,
+        n_stages=args.tfic_stages, sweeps=args.tfic_sweeps,
+        c_cand=args.tfic_ccand, top_m=args.tfic_topm, chunk_cols=args.tfic_chunk)
     raise ValueError(name)
 
 
@@ -83,6 +89,7 @@ def main():
     p.add_argument("--tfic-sweeps", type=int, default=3)
     p.add_argument("--tfic-ccand", type=float, default=8.0)
     p.add_argument("--tfic-topm", type=int, default=32)
+    p.add_argument("--tfic-chunk", type=int, default=256)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
