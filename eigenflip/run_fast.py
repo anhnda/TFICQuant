@@ -72,6 +72,8 @@ def main():
     p.add_argument("--cache-dir", default="./calibration_cache")
     p.add_argument("--awq-scales-pt", default=None)
     p.add_argument("--eig-on-cpu", action="store_true")
+    p.add_argument("--gram-on-gpu", action="store_true",
+                   help="keep d x d Gram in VRAM (old behavior; OOM-prone)")
     p.add_argument("--clc-knee", type=float, default=-10.0)
     p.add_argument("--clc-budget", type=float, default=1.0)
     p.add_argument("--ef-knee", type=float, default=-10.0)
@@ -146,6 +148,7 @@ def main():
         need_H=need_H, k=args.k, eps=args.eps, callback=callback,
         layer_batch_size=args.layer_batch_size,
         keep_sigma=keep_sigma, skip_lm_head=True, eig_on_cpu=args.eig_on_cpu,
+        gram_on_cpu=not args.gram_on_gpu,
         max_length=args.seqlen)
 
     out = os.path.join(args.output_dir, f"{args.base}_{args.encoder}")

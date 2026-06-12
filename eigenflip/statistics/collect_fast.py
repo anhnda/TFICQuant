@@ -43,13 +43,17 @@ def is_lm_head(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 class _Acc:
-    def __init__(self, d, need_H, device):
+    def __init__(self, d, need_H, device, gram_on_cpu=True):
         self.d = d
         self.need_H = need_H
+        self.compute_device = device                       # where the matmul runs
+        self.gram_device = torch.device("cpu") if gram_on_cpu else device
         self.s1 = torch.zeros(d, dtype=torch.float64, device=device)
         self.s2 = torch.zeros(d, dtype=torch.float64, device=device)
         self.n = 0
-        self.G = torch.zeros(d, d, dtype=torch.float64, device=device) if need_H else None
+        # d x d Gram lives in CPU RAM (the 1.6 GB fp64 buffer that OOM'd VRAM)
+        self.G = (torch.zeros(d, d, dtype=torch.float64, device=self.gram_device)
+                  if need_H else None)
 
     @torch.no_grad()
     def add(self, x):
@@ -60,7 +64,9 @@ class _Acc:
         self.s2 += (xf * xf).sum(0).double()
         self.n += xf.shape[0]
         if self.G is not None:
-            self.G += (xf.t() @ xf).double()
+            g = (xf.t() @ xf).double()                     # GPU matmul (fast)
+            self.G += g.to(self.gram_device)               # accumulate in CPU RAM
+            del g
         del xf
 
     @torch.no_grad()
@@ -74,9 +80,14 @@ class _Acc:
                               diag_H=diag_H, diag_Sigma=diag_Sigma,
                               U_k=None, Lam_k=None, eps=eps,
                               Sigma=None, backend="mean").build()
-        Sigma = self.G / n - torch.outer(mu, mu)
+        # G is on self.gram_device (CPU); keep mu/outer there too
+        mu_g = mu.to(self.G.device)
+        Sigma = self.G / n - torch.outer(mu_g, mu_g)
         Sigma = 0.5 * (Sigma + Sigma.t())
         diag_Sigma = torch.diagonal(Sigma).clone()
+        # re-home the scalars onto the Gram device so build() is single-device
+        mu = mu_g
+        diag_H = diag_H.to(self.G.device)
         U_k = Lam_k = None
         if k > 0:
             S = Sigma if eig_device is None else Sigma.to(eig_device)
@@ -111,6 +122,7 @@ def collect_and_encode_awq_style(
     keep_sigma=False,
     skip_lm_head=True,
     eig_on_cpu=False,
+    gram_on_cpu=True,
     max_length=2048,
 ):
     """
@@ -143,7 +155,8 @@ def collect_and_encode_awq_style(
         print(f"\n[batch {bi+1}/{n_batches}] layers {s}-{e-1}")
 
         # one accumulator per layer in batch
-        accs = {n: _Acc(m.weight.shape[1], need_H, device) for n, m in batch}
+        accs = {n: _Acc(m.weight.shape[1], need_H, device, gram_on_cpu=gram_on_cpu)
+                for n, m in batch}
 
         def mk_hook(nm):
             def hook(_m, inp, _o):
