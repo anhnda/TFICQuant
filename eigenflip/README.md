@@ -1,0 +1,169 @@
+# EigenFlip / EigenFlip Solve
+
+M� nguồn cho paper **"EigenFlip Solve: Encoding Within the Statistical Trust
+Region of Post-Training Quantization"**.
+
+Ý tưởng chính: PTQ chia làm 4 tầng — transform → rate → codebook → **encoder**
+(ánh xạ weight liên tục thành code rời rạc). Bài này chỉ tấn công tầng
+**encoder**. Cùng một *base* (transform + scale), thay *encoder* khác nhau để so
+sánh. Encoder được xây trên "trust region" thống kê của `H = E[xx^T]`:
+
+```
+H~_k = D + mu mu^T + U_k Lam_k U_k^T          (Eq. 2)
+       diag   mean       top-k eigenspace
+```
+
+GPTQ điều kiện hóa trên **toàn bộ** `H` (kể cả phần nhiễu, không ổn định khi
+n/d nhỏ). EigenFlip Solve chạy đúng luật GPTQ nhưng chỉ trên `H~_k` — phần
+*ước lượng được*. Woodbury làm mọi bước thành rank-(k+1), **không bao giờ tạo
+ma trận d×d**, không cần damping.
+
+---
+
+## Tổ chức code
+
+```
+eigenflip/
+|-- run_fast.py                 * ENTRY POINT: 1 base x 1 encoder / lan chay
+|-- eval_ppl.py                 perplexity WikiText-2 / C4 (ghi ppl.json)
+|
+|-- statistics/                 THU THAP THONG KE (calibration)
+|   |-- collect_fast.py         * AWQ-style: batch layer, calib 1 lan/batch,
+|   |                             STREAM thong ke (khong luu activation)
+|   |-- trust_region.py         LayerStats: dung D va V=[mu | U_k Lam_k^0.5]
+|   |                             KHONG bao gio tao H~ = D+VV^T
+|   |-- james_stein.py          shrinkage cho mean mu (1 ban chuan)
+|   \-- accumulators.py         (cu, khong dung -- collect_fast co _Acc rieng)
+|
+|-- quantization/               BASE (sinh code nguyen ban tu weight)
+|   |-- state.py                IntegerQuantizedTensorState
+|   |                             .from_rtn() / .from_awq()
+|   \-- awq_scales.py           lay scale AWQ tu awq run (cho base=awq)
+|
+|-- encoders/                   ENCODER (sua code, dung LayerStats)
+|   |-- base_encoder.py         IdentityEncoder = "none" (chi dequant base)
+|   |-- flip.py                 CLC (rung 1) + EigenFlip (rung 2): budgeted flip
+|   |-- eigenflip_solve.py      * Algorithm 1: Woodbury sequential conditioning
+|   |-- shrinkage.py            shrinkage-GPTQ (baseline Section 6.6)
+|   \-- dense_reference.py      DenseGPTQ (full H) + DenseSurrogateGPTQ (kiem thu)
+|
+|-- pipeline/
+|   \-- distortion.py           tr(E H' E^T) + tune lambda held-out (Section 6.6)
+|
+\-- validate_*.py               kiem thu bang numpy (khong can GPU)
+    |-- validate_solve.py       Solve == dense GPTQ-on-H~: 100% trung code
+    |-- validate_flip.py        flip giam ||z||^2 + ton trong budget
+    \-- validate_66.py          shrinkage builder giu dung duong cheo
+```
+
+`*` = file cot loi.
+
+---
+
+## Moi encoder can thong ke gi (QUAN TRONG cho toc do)
+
+Chi thu thap dung cai can -- do la chia khoa toc do:
+
+| Encoder           | Can              | Thu thap           | need_H |
+|-------------------|------------------|--------------------|--------|
+| none (rtn base)   | khong gi         | --                 | False  |
+| clc               | E[X] (mean)      | running sum O(d)   | False  |
+| eigenflip         | mean + top-k eig | streaming Gram dxd | True   |
+| eigenflip_solve   | mean + top-k eig | streaming Gram dxd | True   |
+| gptq              | full H           | streaming Gram dxd | True   |
+| shr_gptq_cov      | full H           | streaming Gram dxd | True   |
+| shr_gptq_2m       | full H           | streaming Gram dxd | True   |
+
+**Streaming, khong luu activation:** hook KHONG `.append(activation)` (cach AWQ
+goc ton 8.6 GB RAM). Thay vao do *fold* ngay moi lan hook vao accumulator roi
+bo tensor di:
+- mean-only: `s1 += x.sum(0)` -- O(d)
+- Gram: `G += x^T x` (matmul fp32, cong don fp64) -- dxd, khong bao gio tao
+  ma tran activation khong lo
+
+---
+
+## Toc do: cach thu thap
+
+**need_H=False (rtn/clc):** hook **HET 224 layer 1 lan**, calib **1 pass duy
+nhat**. Vi mean chi O(d), 224 mean = vai MB, khong OOM. -> nhanh.
+
+**need_H=True (eigenflip/gptq):** batch `layer_batch_size` layer, moi batch
+calib lai (Gram dxd ton RAM nen phai batch). Day la AWQ-style -- giong AWQ goc,
+moi batch model chay lai tu dau. Muon nhanh hon nua -> can doi sang GPTQ
+block-paged (chua lam; bao neu can).
+
+`--layer-batch-size` theo encoder de tranh OOM (moi Gram dxd fp64 o
+Llama-3 8B: hidden 4096 -> 134 MB, MLP 14336 -> 1.6 GB):
+- none / clc: 16 (khong ton -- bi override thanh "hook het" anyway)
+- eigenflip / eigenflip_solve: 8
+- gptq / shr_*: 4 `--eig-on-cpu`
+
+---
+
+## Luong chay (run_fast.py)
+
+```
+1. Load model + tokenizer + calib (C4, return_tensors=True -> giu full seqlen)
+2. enc = build_encoder(--encoder)        ; need_H, keep_sigma suy ra tu encoder
+3. collect_and_encode_awq_style(...):
+   voi moi batch layer:
+     a. hook -> calib 1 pass -> stream stat (mean hoac Gram)
+     b. moi layer: stat -> LayerStats -> callback:
+          base_state = from_rtn(W) hoac from_awq(W, scale)
+          corrected  = enc.apply(base_state, stats)   <- QUANTIZE O DAY
+          module.weight.data = corrected               <- ghi de weight
+4. save model -> output-dir/<base>_<encoder>/
+```
+
+Quantize xay ra trong `callback` (in ra `quantized N layers` moi batch).
+
+---
+
+## Chay
+
+Mot cell (base x encoder) moi lan de gioi han RAM:
+
+```bash
+PYTHONPATH=. python eigenflip/run_fast.py \
+  --model-path /path/to/Meta-Llama-3.1-8B \
+  --base rtn --encoder eigenflip_solve --k 16 \
+  --bits 3 --group-size 128 \
+  --calib-dataset c4 --n-calib 128 --seqlen 2048 \
+  --layer-batch-size 8 \
+  --output-dir ./quantized_models/ll31_3bit
+```
+
+Ca bang + PPL: dung `run_all.sh` (vong lap qua cac encoder, layer-batch-size
+tu dat theo encoder, eval PPL, luu rtn_<enc>_ppl.json, xoa checkpoint).
+
+Encoder: `none clc eigenflip eigenflip_solve gptq shr_gptq_cov shr_gptq_2m`
+Base: `rtn` | `awq` (awq can `--awq-scales-pt` tu awq run cua may)
+
+Heavy layer / het VRAM: them `--eig-on-cpu` (chay eigh tren CPU).
+
+---
+
+## Kiem thu (numpy, khong can GPU)
+
+```bash
+python eigenflip/validate_solve.py    # Solve == dense GPTQ: 100% trung code
+python eigenflip/validate_flip.py     # flip giam ||z||^2, ton trong budget
+python eigenflip/validate_66.py       # shrinkage giu dung duong cheo
+```
+
+`validate_solve.py` da xac nhan **100% trung bit** giua EigenFlip Solve
+(Woodbury, khong dxd) va dense GPTQ chay tren H~ -- tuc Solve la *cai dat chinh
+xac* cua luat sequential, khong phai xap xi.
+
+---
+
+## Ghi chu
+
+- **lm_head:** bo qua quantize (mac dinh).
+- **dtype:** Gram matmul fp32 (nhanh) cong don vao buffer fp64 (du chinh xac
+  cho eigenstructure). Dung de fp64 matmul -- cham 30x tren GPU.
+- **eigenflip_solve khong bao gio tao dxd** -- assert Sigma is None. Chi
+  V [d,k+1], M/M^-1 [k+1,k+1], G [C,k+1].
+- **AWQ base** dung dung key model.layers.N.sublayer -- khop voi key awq run
+  cua may, neu khong se KeyError.
