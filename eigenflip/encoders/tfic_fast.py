@@ -130,10 +130,22 @@ class TFICEncoder:
 
             # ---- adaptive transverse field (Eq. 13), U_fru fully vectorised
             U_fld = torch.exp(-dE.clamp_min(0.0) / tau)
-            dk = delta[:, nbr_idx]                          # [C,pin,m]
-            U_fru = ((-2.0 * delta.unsqueeze(2) * dk * G_nbr.unsqueeze(0))
-                     .clamp_min(0.0).sum(2) / tau).clamp(max=1.0)
-            del dk
+            # U_fru[:, j] = clamp01( sum_k clamp0(-2 delta[:,j] delta[:,nbr[j,k]]
+            #                                       G_nbr[j,k]) / tau )
+            # Materializing the full [C,pin,m] product OOMs on wide layers
+            # (down_proj: 4096*14336*32*4B ~ 7.5 GB), so accumulate U_fru in
+            # column blocks; result is bit-identical to the one-shot form.
+            U_fru = torch.empty_like(delta)
+            cs_fru = max(1, self.chunk_cols)
+            for j0 in range(0, pin, cs_fru):
+                j1 = min(j0 + cs_fru, pin)
+                d_blk = delta[:, j0:j1]                     # [C,b]
+                dk = delta[:, nbr_idx[j0:j1]]               # [C,b,m]
+                contrib = (-2.0 * d_blk.unsqueeze(2) * dk
+                           * G_nbr[j0:j1].unsqueeze(0))     # [C,b,m]
+                U_fru[:, j0:j1] = (contrib.clamp_min(0.0).sum(2)
+                                   / tau).clamp(max=1.0)
+                del dk, contrib, d_blk
             Gamma = self.alpha * U_bnd + self.beta * U_fld + self.eta * U_fru
             Gamma = torch.where(scale > 0, Gamma, torch.zeros_like(Gamma))
             pool = (Gamma > gamma_a) & in_range
