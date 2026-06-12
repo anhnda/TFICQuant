@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-MODEL_PATH=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b
+MODEL_PATH=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--mistralai--Mistral-7B-v0.3/snapshots/caa1feb0e54d415e2df31207e5f4e273e33509b1  #/home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b
 OUTPUT_DIR=./quantized_models/eigenflip_3bit
 LOG_DIR=./logs
 mkdir -p "$LOG_DIR"
@@ -8,8 +8,8 @@ LOG_FILE="$LOG_DIR/eigenflip_3bit_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== run started $(date) ==="
 echo "log: $LOG_FILE"
-#none clc eigenflipeigenflip_solve gptq tfic
-for ENC in tfic_fast; do
+#none clc eigenflip eigenflip_solve gptq tfic
+for ENC in none clc eigenflip gptq tfic_fast; do
   CELL_DIR="$OUTPUT_DIR/rtn_${ENC}"
 
   # layer-batch-size per encoder: Gram-heavy ones need smaller batches / cpu eigh
