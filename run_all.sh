@@ -16,7 +16,7 @@ for ENC in tfic; do
   case "$ENC" in
     none|clc)                   LBS=16; EXTRA="" ;;
     eigenflip|eigenflip_solve)  LBS=8;  EXTRA="" ;;
-    gptq)                       LBS=4;  EXTRA="--eig-on-cpu" ;;
+    gptq|tfic)                       LBS=4;  EXTRA="--eig-on-cpu" ;;
   esac
 
   echo
