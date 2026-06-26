@@ -12,7 +12,7 @@ echo "=== run started $(date) ==="
 echo "log: $LOG_FILE"
 #none clc eigenflip eigenflip_solve gptq tfic tfic_fast tfica_fast
 # tfica_fast = TFIC-A (asymmetric, GPTAQ-style block-causal). Pass --asym.
-for ENC in  tfica_fast; do
+for ENC in  gptq; do
   CELL_DIR="$OUTPUT_DIR/rtn_${ENC}"
 
   # layer-batch-size per encoder: Gram-heavy ones need smaller batches / cpu eigh.

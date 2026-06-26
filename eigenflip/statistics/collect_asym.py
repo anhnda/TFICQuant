@@ -6,11 +6,14 @@ AWQ path runs ONE full-precision forward and hooks every layer's input, so each
 layer sees only the clean input X~ and never the quantized input X. Asymmetric
 calibration (GPTAQ) needs the field shift
 
-    F = (1/n) X~_sc^T dY^T,   dY = W_fp X~ - W_q X~     (per linear layer)
+    F = (1/n) X~_sc^T dY^T,   dY = W_fp (X~ - X)     (per linear layer)
 
-i.e. how much the layer output moves when its FP weight is replaced by the
-quantized one, measured on the clean input. The upstream-input deviation is
-carried by the dirty stream that drives the NEXT block's G.
+i.e. the layer-output deviation caused by the UPSTREAM accumulated input error
+X~ - X (clean minus dirty), measured through the FP weight. This is the GPTAQ
+asymmetric target: it corrects for errors injected by previously-quantized
+layers, NOT for the current layer's own weight quantization (the TFIC quadratic
+term already handles that). Using (W_fp - W_q) X~ instead is WRONG -- it double-
+counts the current layer and degrades results.
 
 GPTAQ's Algorithm 2 walks blocks in forward order keeping two activations:
   * X~ through the *unquantized* block (FP target),
@@ -19,9 +22,9 @@ quantizing each block before advancing. X~ is materialized only inside the
 current block and dropped after F is folded -- never kept network-wide.
 
 Per block, three cheap passes over the calib set, each touching ONE block:
-  Pass A  clean stream through FP block      -> stream G on X~, save clean output
-  (probe-quantize every linear: encoder run on a clone, weight NOT yet written)
-  Pass B  clean stream through FP block again -> fold F = X~^T (W_fp X~ - W_q X~)
+  Pass A  clean stream through FP block       -> stream G on X~, save clean output
+  Pass B  clean AND dirty streams through FP block -> fold
+          F = (1/n) X~^T dY^T,  dY = W_fp (X~ - X)   (same FP weight!)
   final   encode WITH field F, write module.weight in place
   Pass C  dirty stream through quantized block -> advance X for next block
 
@@ -242,35 +245,61 @@ def collect_and_encode_asym(
         for hh in ha:
             hh.remove()
 
-        # ---- probe-quantize each linear (encoder on a clone; weight NOT written) ----
-        q_weight = {}
-        for n, m in tqdm(lin, desc=f'  blk{bi} probe-q', leave=False):
-            st_tmp = accs[n].to_stats(k, eps, keep_sigma, eig_device,
-                                      with_field=False)
-            q_weight[n] = _probe_quantize(callback, n, m, st_tmp).to(m.weight.dtype)
-            st_tmp.free_sigma()
-            del st_tmp
+        # ---- (no probe needed): dY = W_fp(X~ - X) uses only the FP weight, so
+        # we can fold F directly in Pass B and quantize once afterwards. ----
 
-        # ---- Pass B: clean stream again (still FP weights); fold F on X~ ----
-        hb = [m.register_forward_pre_hook(mk_pre(n), with_kwargs=True)
-              for n, m in lin]
+        # ---- Pass B: fold the asymmetric field F.
+        # CORRECT GPTAQ definition: dY = W(X~ - X) -- SAME FP weight, the
+        # difference of the CLEAN input X~ and the DIRTY input X. This captures
+        # the upstream accumulated error (what asymmetric calibration is for),
+        # NOT the current layer's own weight quantization (which the TFIC
+        # quadratic term already handles). We forward both streams through the
+        # still-FP block and read each layer's input from each stream.
+        cap_clean, cap_dirty = {}, {}
+
+        def mk_pre_into(store):
+            def pre(_m, args, kwargs):
+                x = args[0] if args else kwargs.get("input")
+                # key by module id since the same module fires in both passes
+                store[id(_m)] = x.detach()
+            return pre
+
+        hb_c = [m.register_forward_pre_hook(mk_pre_into(cap_clean),
+                                            with_kwargs=True) for _n, m in lin]
         for si in tqdm(range(len(clean)), desc=f'  blk{bi} passB', leave=False):
-            hs = clean[si].to(device)
             kw = _to_dev(kwargs_list[si], device)
-            block(hs, **kw)                          # FP weights -> captures X~
+            hs_c = clean[si].to(device)
+            block(hs_c, **kw)                        # FP block, clean input -> X~
+            cap_dirty.clear()
+            # temporarily swap hooks to capture the dirty input through the SAME
+            # FP block
+            del hs_c
+            hs_d = dirty[si].to(device)
+            for hh in hb_c:
+                hh.remove()
+            hb_d = [m.register_forward_pre_hook(mk_pre_into(cap_dirty),
+                                                with_kwargs=True) for _n, m in lin]
+            block(hs_d, **kw)                        # FP block, dirty input -> X
+            for hh in hb_d:
+                hh.remove()
+            hb_c = [m.register_forward_pre_hook(mk_pre_into(cap_clean),
+                                                with_kwargs=True) for _n, m in lin]
             for n, m in lin:
-                xt = cap_in.get(n)
-                if xt is None:
+                xt = cap_clean.get(id(m))            # X~ (clean)
+                xd = cap_dirty.get(id(m))            # X  (dirty)
+                if xt is None or xd is None:
                     continue
-                xf = xt.reshape(-1, xt.shape[-1])
-                wfp = fp_weight[n].to(xf.dtype)
-                wq = q_weight[n].to(xf.dtype)
-                dy = xf @ wfp.t() - xf @ wq.t()      # [*, C] = W_fp X~ - W_q X~
+                xtf = xt.reshape(-1, xt.shape[-1])
+                xdf = xd.reshape(-1, xd.shape[-1])
+                wfp = fp_weight[n].to(xtf.dtype)
+                dy = (xtf - xdf) @ wfp.t()           # [*, C] = W_fp (X~ - X)
+                # field's left factor is the CLEAN input X~ (paper convention)
                 accs[n].add_field(xt, dy)
-                del xf, dy
-            cap_in.clear()
-            del hs
-        for hh in hb:
+                del xtf, xdf, dy
+            cap_clean.clear()
+            cap_dirty.clear()
+            del hs_d
+        for hh in hb_c:
             hh.remove()
 
         # ---- final encode WITH field F: writes module.weight in place ----
@@ -295,19 +324,8 @@ def collect_and_encode_asym(
             accs[n].free()
         accs.clear()
         fp_weight.clear()
-        q_weight.clear()
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print(f"  block {bi+1} done")
 
-
-def _probe_quantize(callback, name, module, stats):
-    """Run the encoder on a clone without disturbing the live FP weight (Pass B
-    still needs FP). Returns the corrected (quantized) weight tensor."""
-    orig = module.weight.data
-    module.weight.data = orig.clone()
-    callback(name, module, stats)
-    corrected = module.weight.data
-    module.weight.data = orig                        # restore FP for Pass B
-    return corrected
