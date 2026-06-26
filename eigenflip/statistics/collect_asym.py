@@ -214,7 +214,8 @@ def collect_and_encode_asym(
             return pre
 
         # ---- Pass A: clean stream through FP block; stream G; save outputs ----
-        ha = [m.register_forward_pre_hook(mk_pre(n)) for n, m in lin]
+        ha = [m.register_forward_pre_hook(mk_pre(n), with_kwargs=True)
+              for n, m in lin]
         clean_out = []
         for si in range(len(clean)):
             hs = clean[si].to(device)
@@ -241,7 +242,8 @@ def collect_and_encode_asym(
             del st_tmp
 
         # ---- Pass B: clean stream again (still FP weights); fold F on X~ ----
-        hb = [m.register_forward_pre_hook(mk_pre(n)) for n, m in lin]
+        hb = [m.register_forward_pre_hook(mk_pre(n), with_kwargs=True)
+              for n, m in lin]
         for si in range(len(clean)):
             hs = clean[si].to(device)
             kw = _to_dev(kwargs_list[si], device)
