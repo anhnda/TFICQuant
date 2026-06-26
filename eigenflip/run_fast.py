@@ -159,9 +159,12 @@ def main():
         if args.encoder != "tfica_fast":
             raise ValueError("--asym requires --encoder tfica_fast")
         print("  [TFIC-A] block-causal asymmetric collection (GPTAQ-style)")
+        # TFIC-A consumes only Sigma (G = Sigma + mu mu^T); it never reads the
+        # top-k eigfactors. Force k=0 so the per-layer eigh is skipped (a CPU
+        # fp64 eigh on a d x d Gram is minutes/call and stalls collection).
         collect_and_encode_asym(
             model, tok, calib, device,
-            k=args.k, eps=args.eps, callback=callback,
+            k=0, eps=args.eps, callback=callback,
             keep_sigma=keep_sigma, skip_lm_head=True,
             eig_on_cpu=args.eig_on_cpu, gram_on_cpu=not args.gram_on_gpu,
             max_length=args.seqlen)

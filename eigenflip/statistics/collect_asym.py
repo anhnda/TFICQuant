@@ -78,6 +78,7 @@ class _AsymAcc:
         self.G = torch.zeros(d, d, dtype=torch.float64, device=self.gram_device)
         self.SF = torch.zeros(d, C, dtype=torch.float64, device=self.gram_device)
         self.have_dy = False
+        self._cached = None
 
     @torch.no_grad()
     def add_gram(self, x_tilde):
@@ -105,36 +106,45 @@ class _AsymAcc:
     @torch.no_grad()
     def to_stats(self, k, eps, keep_sigma, eig_device, with_field):
         n = max(1, self.n)
-        mu = self.s1 / n
-        diag_H = self.s2 / n
-        mu_g = mu.to(self.G.device)
-        Sigma = self.G / n - torch.outer(mu_g, mu_g)
-        Sigma = 0.5 * (Sigma + Sigma.t())
-        diag_Sigma = torch.diagonal(Sigma).clone()
-        diag_H = diag_H.to(self.G.device)
-        F = (self.SF / n) if (with_field and self.have_dy) else None
+        # cache the covariance: probe (no field) and final (with field) calls
+        # share the SAME Sigma/eigh; building it twice was the hang.
+        if getattr(self, "_cached", None) is None:
+            mu = self.s1 / n
+            diag_H = self.s2 / n
+            mu_g = mu.to(self.G.device)
+            Sigma = self.G / n - torch.outer(mu_g, mu_g)
+            Sigma = 0.5 * (Sigma + Sigma.t())
+            diag_Sigma = torch.diagonal(Sigma).clone()
+            diag_H = diag_H.to(self.G.device)
 
-        U_k = Lam_k = None
-        if k > 0:
-            S = Sigma if eig_device is None else Sigma.to(eig_device)
-            evals, evecs = torch.linalg.eigh(S)
-            topk = torch.argsort(evals, descending=True)[:k]
-            Lam_k = evals[topk].clamp_min(0).to(Sigma.device)
-            U_k = evecs[:, topk].to(Sigma.device)
-            del evals, evecs
-            if S is not Sigma:
-                del S
-        st = LayerStats(d=self.d, mu_hat=james_stein_mean(mu_g),
-                        diag_H=diag_H, diag_Sigma=diag_Sigma,
-                        U_k=U_k, Lam_k=Lam_k, eps=eps, F=F,
-                        Sigma=Sigma if keep_sigma else None,
+            U_k = Lam_k = None
+            # TFIC-A reads only Sigma (G = Sigma + mu mu^T). It never consumes
+            # U_k/Lam_k, so for k<=0 we SKIP the eigh entirely -- a CPU fp64 eigh
+            # on a d x d Gram (d~3.5k for Qwen2.5-7B) is minutes per call and was
+            # the cause of the stall. Only compute it if a caller actually needs
+            # the low-rank factors (k>0).
+            if k > 0:
+                S = Sigma if eig_device is None else Sigma.to(eig_device)
+                evals, evecs = torch.linalg.eigh(S)
+                topk = torch.argsort(evals, descending=True)[:k]
+                Lam_k = evals[topk].clamp_min(0).to(Sigma.device)
+                U_k = evecs[:, topk].to(Sigma.device)
+                del evals, evecs
+                if S is not Sigma:
+                    del S
+            self._cached = dict(mu_g=mu_g, diag_H=diag_H, diag_Sigma=diag_Sigma,
+                                Sigma=Sigma, U_k=U_k, Lam_k=Lam_k)
+        c = self._cached
+        F = (self.SF / n) if (with_field and self.have_dy) else None
+        st = LayerStats(d=self.d, mu_hat=james_stein_mean(c["mu_g"]),
+                        diag_H=c["diag_H"], diag_Sigma=c["diag_Sigma"],
+                        U_k=c["U_k"], Lam_k=c["Lam_k"], eps=eps, F=F,
+                        Sigma=c["Sigma"] if keep_sigma else None,
                         backend="gram_asym").build()
-        if not keep_sigma:
-            del Sigma
         return st
 
     def free(self):
-        self.s1 = self.s2 = self.G = self.SF = None
+        self.s1 = self.s2 = self.G = self.SF = self._cached = None
 
 
 @torch.no_grad()
@@ -217,7 +227,7 @@ def collect_and_encode_asym(
         ha = [m.register_forward_pre_hook(mk_pre(n), with_kwargs=True)
               for n, m in lin]
         clean_out = []
-        for si in range(len(clean)):
+        for si in tqdm(range(len(clean)), desc=f'  blk{bi} passA', leave=False):
             hs = clean[si].to(device)
             kw = _to_dev(kwargs_list[si], device)
             out = block(hs, **kw)
@@ -234,7 +244,7 @@ def collect_and_encode_asym(
 
         # ---- probe-quantize each linear (encoder on a clone; weight NOT written) ----
         q_weight = {}
-        for n, m in lin:
+        for n, m in tqdm(lin, desc=f'  blk{bi} probe-q', leave=False):
             st_tmp = accs[n].to_stats(k, eps, keep_sigma, eig_device,
                                       with_field=False)
             q_weight[n] = _probe_quantize(callback, n, m, st_tmp).to(m.weight.dtype)
@@ -244,7 +254,7 @@ def collect_and_encode_asym(
         # ---- Pass B: clean stream again (still FP weights); fold F on X~ ----
         hb = [m.register_forward_pre_hook(mk_pre(n), with_kwargs=True)
               for n, m in lin]
-        for si in range(len(clean)):
+        for si in tqdm(range(len(clean)), desc=f'  blk{bi} passB', leave=False):
             hs = clean[si].to(device)
             kw = _to_dev(kwargs_list[si], device)
             block(hs, **kw)                          # FP weights -> captures X~
@@ -264,7 +274,7 @@ def collect_and_encode_asym(
             hh.remove()
 
         # ---- final encode WITH field F: writes module.weight in place ----
-        for n, m in lin:
+        for n, m in tqdm(lin, desc=f'  blk{bi} final-q', leave=False):
             st = accs[n].to_stats(k, eps, keep_sigma, eig_device,
                                   with_field=True)
             callback(n, m, st)
@@ -272,7 +282,7 @@ def collect_and_encode_asym(
             del st
 
         # ---- Pass C: advance dirty stream through quantized block ----
-        for si in range(len(dirty)):
+        for si in tqdm(range(len(dirty)), desc=f'  blk{bi} passC', leave=False):
             hs = dirty[si].to(device)
             kw = _to_dev(kwargs_list[si], device)
             out = block(hs, **kw)
