@@ -19,6 +19,8 @@ from eigenflip.encoders.dense_reference import DenseGPTQ
 from eigenflip.encoders.shrinkage import ShrinkageGPTQ
 from eigenflip.encoders.tfic import TFICEncoder
 from eigenflip.encoders.tfic_fast import TFICEncoder as TFICEncoderFast
+from eigenflip.encoders.tfica_fast import TFICAEncoder
+from eigenflip.statistics.collect_asym import collect_and_encode_asym
 from eigenflip.quantization.awq_scales import scales_from_awq_run
 
 try:
@@ -30,8 +32,9 @@ except ImportError:
 NEED_H = {"none": False, "clc": False,
           "eigenflip": True, "eigenflip_solve": True,
           "gptq": True, "shr_gptq_cov": True, "shr_gptq_2m": True,
-          "tfic": True, "tfic_fast": True}
-KEEP_SIGMA = {"gptq", "shr_gptq_cov", "shr_gptq_2m", "tfic", "tfic_fast"}
+          "tfic": True, "tfic_fast": True, "tfica_fast": True}
+KEEP_SIGMA = {"gptq", "shr_gptq_cov", "shr_gptq_2m", "tfic", "tfic_fast",
+              "tfica_fast"}
 
 
 def build_encoder(name, args):
@@ -48,6 +51,11 @@ def build_encoder(name, args):
         n_stages=args.tfic_stages, sweeps=args.tfic_sweeps,
         c_cand=args.tfic_ccand, top_m=args.tfic_topm)
     if name == "tfic_fast": return TFICEncoderFast(
+        alpha=args.tfic_alpha, beta=args.tfic_beta, eta=args.tfic_eta,
+        gamma_th=args.tfic_gamma, kappa=args.tfic_kappa, gmax=args.tfic_gmax,
+        n_stages=args.tfic_stages, sweeps=args.tfic_sweeps,
+        c_cand=args.tfic_ccand, top_m=args.tfic_topm, chunk_cols=args.tfic_chunk)
+    if name == "tfica_fast": return TFICAEncoder(
         alpha=args.tfic_alpha, beta=args.tfic_beta, eta=args.tfic_eta,
         gamma_th=args.tfic_gamma, kappa=args.tfic_kappa, gmax=args.tfic_gmax,
         n_stages=args.tfic_stages, sweeps=args.tfic_sweeps,
@@ -92,6 +100,10 @@ def main():
     p.add_argument("--tfic-ccand", type=float, default=8.0)
     p.add_argument("--tfic-topm", type=int, default=32)
     p.add_argument("--tfic-chunk", type=int, default=256)
+    p.add_argument("--asym", action="store_true",
+                   help="TFIC-A: GPTAQ-style block-causal collection that "
+                        "streams the asymmetric field F (encoder=tfica_fast). "
+                        "Without this flag tfica_fast runs symmetric (F=None).")
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
@@ -143,13 +155,24 @@ def main():
         del state, corrected
 
     print(f"base={args.base} encoder={args.encoder} need_H={need_H} k={args.k}")
-    collect_and_encode_awq_style(
-        model, tok, calib, device,
-        need_H=need_H, k=args.k, eps=args.eps, callback=callback,
-        layer_batch_size=args.layer_batch_size,
-        keep_sigma=keep_sigma, skip_lm_head=True, eig_on_cpu=args.eig_on_cpu,
-        gram_on_cpu=not args.gram_on_gpu,
-        max_length=args.seqlen)
+    if args.asym:
+        if args.encoder != "tfica_fast":
+            raise ValueError("--asym requires --encoder tfica_fast")
+        print("  [TFIC-A] block-causal asymmetric collection (GPTAQ-style)")
+        collect_and_encode_asym(
+            model, tok, calib, device,
+            k=args.k, eps=args.eps, callback=callback,
+            keep_sigma=keep_sigma, skip_lm_head=True,
+            eig_on_cpu=args.eig_on_cpu, gram_on_cpu=not args.gram_on_gpu,
+            max_length=args.seqlen)
+    else:
+        collect_and_encode_awq_style(
+            model, tok, calib, device,
+            need_H=need_H, k=args.k, eps=args.eps, callback=callback,
+            layer_batch_size=args.layer_batch_size,
+            keep_sigma=keep_sigma, skip_lm_head=True, eig_on_cpu=args.eig_on_cpu,
+            gram_on_cpu=not args.gram_on_gpu,
+            max_length=args.seqlen)
 
     out = os.path.join(args.output_dir, f"{args.base}_{args.encoder}")
     os.makedirs(out, exist_ok=True)

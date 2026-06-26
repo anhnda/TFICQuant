@@ -36,6 +36,10 @@ class LayerStats:
     U_k: Optional[torch.Tensor] = None        # [d, k] or None (rung<2)
     Lam_k: Optional[torch.Tensor] = None      # [k]   or None
     eps: float = 1e-6
+    # asymmetric-calibration field F = (1/n) X_sc^T (dY)^T, dY = W(X~ - X).
+    # Shape [d_in, C] (= [d, out_features]). None => symmetric (TFIC reduces to
+    # the standard reconstruction objective). Only the TFIC-A encoder reads it.
+    F: Optional[torch.Tensor] = None          # [d, C] or None
     # filled by build():
     D: torch.Tensor = field(default=None, repr=False)      # [d] floored residual diag
     V: torch.Tensor = field(default=None, repr=False)      # [d, k+1]
