@@ -55,7 +55,8 @@ class TFICAEncoder:
                  gmax: int = 6, n_stages: int = 2, sweeps: int = 3,
                  c_cand: float = 8.0, top_m: int = 32,
                  max_tunnel_rows: int = 512, max_clusters_per_row: int = 50,
-                 chunk_cols: int = 256, work_dtype=torch.float32):
+                 chunk_cols: int = 256, work_dtype=torch.float32,
+                 field_scale: float = 1.0, guard_ratio: float = 2.0):
         self.alpha = alpha
         self.beta = beta
         self.eta = eta
@@ -70,6 +71,8 @@ class TFICAEncoder:
         self.max_clusters_per_row = int(max_clusters_per_row)
         self.chunk_cols = int(chunk_cols)
         self.work_dtype = work_dtype
+        self.field_scale = float(field_scale)   # lambda_F: damp the asym field
+        self.guard_ratio = float(guard_ratio)   # max sym-energy blow-up allowed
 
     # ------------------------------------------------------------------ #
     @torch.no_grad()
@@ -111,6 +114,8 @@ class TFICAEncoder:
                 Fp[:F.shape[0]] = F
                 F = Fp
             RGF = F.t().contiguous()                         # [C, pin]
+            if self.field_scale != 1.0:
+                RGF = RGF * self.field_scale
             del F
             asym = True
         else:
@@ -236,6 +241,22 @@ class TFICAEncoder:
 
         R_final = (Wint - zp) * scale - Wf
         e_final = (R_final * (R_final @ G)).sum().item()
+
+        # SAFETY GUARD. The asymmetric field pulls R away from 0 to track the
+        # upstream-error target dY. With a base like RTN at 3-bit the upstream
+        # error -- and hence F -- can be large, and an over-strong pull can blow
+        # up the layer output (cascading to nonsense PPL). TFIC's monotonicity is
+        # on E_asym, NOT on the plain reconstruction Tr(R G R^T); so we cap how
+        # far the *symmetric* energy is allowed to grow. If a layer's symmetric
+        # reconstruction degrades past `guard_ratio` x the RTN baseline, we treat
+        # the asymmetric correction as unsafe for that layer and fall back to the
+        # symmetric-TFIC result (recomputed by ignoring F) -- never worse than
+        # tfic_fast.
+        if asym and self._guard_tripped(e0, e_final):
+            print(f"    [asym] GUARD: sym energy {e0:.3e}->{e_final:.3e} "
+                  f"exceeds {self.guard_ratio}x -> fallback to symmetric TFIC")
+            return self._symmetric_fallback(state, stats)
+
         out = (Wint - zp) * scale
         if pin > d:
             out = out[:, :d]
@@ -251,6 +272,28 @@ class TFICAEncoder:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return out.to(state.original_dtype), info
+
+    def _guard_tripped(self, e0, e_final):
+        if not (e0 == e0 and e_final == e_final):   # NaN
+            return True
+        if e_final != e_final or e_final == float("inf"):
+            return True
+        base = abs(e0) + 1e-12
+        return e_final > self.guard_ratio * base
+
+    @torch.no_grad()
+    def _symmetric_fallback(self, state, stats):
+        """Re-run with the field disabled => identical to symmetric tfic_fast.
+        Guarded against recursion by temporarily detaching stats.F."""
+        savedF = getattr(stats, "F", None)
+        try:
+            stats.F = None
+            out, info = self.apply(state, stats)
+        finally:
+            stats.F = savedF
+        info["asymmetric"] = False
+        info["asym_fallback"] = True
+        return out, info
 
     # ------------------------- helpers (GPU) --------------------------- #
     @staticmethod

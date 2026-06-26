@@ -139,6 +139,17 @@ class _AsymAcc:
                                 Sigma=Sigma, U_k=U_k, Lam_k=Lam_k)
         c = self._cached
         F = (self.SF / n) if (with_field and self.have_dy) else None
+        if F is not None:
+            # guard: a non-finite or exploded field collapses the model. Report
+            # the field-to-Gram magnitude ratio so a runaway F is visible, and
+            # zero out non-finite entries rather than poisoning the encoder.
+            nf = (~torch.isfinite(F)).sum().item()
+            if nf:
+                print(f"    [asym] WARN: {nf} non-finite F entries -> zeroed")
+                F = torch.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
+            f_rms = F.pow(2).mean().sqrt().item()
+            g_rms = c["Sigma"].pow(2).mean().sqrt().item() if c["Sigma"] is not None else float("nan")
+            print(f"    [asym] |F|_rms={f_rms:.3e}  |Sigma|_rms={g_rms:.3e}")
         st = LayerStats(d=self.d, mu_hat=james_stein_mean(c["mu_g"]),
                         diag_H=c["diag_H"], diag_Sigma=c["diag_Sigma"],
                         U_k=c["U_k"], Lam_k=c["Lam_k"], eps=eps, F=F,
