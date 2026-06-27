@@ -325,6 +325,17 @@ def collect_and_encode_asym(
             del hs, out, out_hs
 
         clean = clean_out                            # advance clean stream
+        # ---- diagnostic: watch the two streams for blow-up (cascade) ----
+        try:
+            dmax = max(d.abs().max().item() for d in dirty)
+            cmax = max(c.abs().max().item() for c in clean)
+            ddev = max((dirty[i].to(torch.float32) - clean[i].to(torch.float32)
+                        ).abs().max().item() for i in range(len(dirty)))
+            nan_d = any((~torch.isfinite(d)).any().item() for d in dirty)
+            print(f"  [diag blk{bi}] |dirty|max={dmax:.2f} |clean|max={cmax:.2f} "
+                  f"|X~-X|max={ddev:.2f} dirty_nan={nan_d}")
+        except Exception as _e:
+            print(f"  [diag blk{bi}] failed: {_e}")
         for n in list(accs.keys()):
             accs[n].free()
         accs.clear()

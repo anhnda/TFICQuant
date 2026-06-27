@@ -56,3 +56,10 @@ Wrote ./quantized_models/eigenflip_3bit/rtn_tfica_fast/ppl.json
 >>> [2.5] preserving ppl.json
 >>> [3/3] deleting ./quantized_models/eigenflip_3bit/rtn_tfica_fast
 <<< done rtn+tfica_fast
+
+Sau fix
+SUMMARY  rtn_tfica_fast  wikitext2=9.6230 | c4=12.9504
+Wrote ./quantized_models/eigenflip_3bit/rtn_tfica_fast/ppl.json
+>>> [2.5] preserving ppl.json
+>>> [3/3] deleting ./quantized_models/eigenflip_3bit/rtn_tfica_fast
+<<< done rtn+tfica_fast
