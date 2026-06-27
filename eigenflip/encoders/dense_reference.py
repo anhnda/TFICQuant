@@ -28,28 +28,30 @@ from ..statistics.trust_region import LayerStats
 
 
 @torch.no_grad()
-def _sequential_condition(Wf, scale, zp, lo, hi, Hmat, order, work_dtype):
+def _sequential_condition(Wf, scale, zp, lo, hi, Hmat, order, work_dtype,
+                         dXXT=None, alpha=0.0):
     """
     GPTQ sequential conditioning under a dense quadratic Hmat, matching the
-    coordinate order. Returns integer codes [C, pin].
+    coordinate order. Returns (codes [C,pin], What [C,pin]).
 
-    TRUE GPTQ semantics: at step t, condition on the CURRENT remaining set R
-    (not-yet-quantized coordinates). Compensation for r in R\\{i} is
-        w_r -= e_i * [H_RR^{-1}]_{r,i} / [H_RR^{-1}]_{ii},
-    with H_RR the principal submatrix on R. This is what GPTQ's running
-    Cholesky/Schur complement computes and what EigenFlip Solve's Woodbury
-    capacitance downdate reproduces. A fixed full-matrix inverse instead would
-    silently disagree with Algorithm 1 by +/-1 codes (verified). Explicit
-    recompute is O(d^4); fine for a reference harness.
+    `What` is the OBS-SHIFTED full-precision weight at the moment each column is
+    quantized -- the continuous value the column is rounded FROM, AFTER all
+    upstream-column compensations. This is the correct "pre-round" target for a
+    post-hoc TFIC flip pass: TFIC chooses floor/ceil around What, NOT around the
+    original W (rounding around W is a no-op once codes are committed).
+
+    GPTAQ asymmetric calibration: pass `dXXT = ΔX·Xᵀ` ([pin,pin], NOT /n) and
+    `alpha>0`. We build, in the permuted frame (where Hinv is already formed),
+        P = alpha * (dXXT_perm @ Hinv^T).triu(1) @ Hinv
+    and apply the extra term  + w_pre * P[i, i+1:]  to the remaining columns,
+    reproducing GPTAQ's  W1[:, i:] -= err*Hinv[i,i:] - w*P[i,i:].
+    With alpha=0 this is exactly plain GPTQ.
     """
     dev = Wf.device
     C, pin = Wf.shape
     Hmat = Hmat.to(work_dtype)
     order = list(order)
 
-    # STANDARD GPTQ: permute (H, W, scale, zp) into processing order, invert H
-    # ONCE, then schur-downdate the inverse by rank-1 each step -- O(d^3) total,
-    # not O(d^4). Bitwise-identical to the per-step inv(H_RR) form (verified).
     p = torch.tensor(order, device=dev)
     Hp = Hmat.index_select(0, p).index_select(1, p)        # [pin, pin]
     Wp = Wf.index_select(1, p).clone()                     # [C, pin]
@@ -57,27 +59,39 @@ def _sequential_condition(Wf, scale, zp, lo, hi, Hmat, order, work_dtype):
     zp_p = zp.index_select(1, p)
     Hinv = torch.linalg.inv(Hp)
     codes_p = torch.empty(C, pin, device=dev, dtype=torch.long)
+    What_p = torch.empty(C, pin, device=dev, dtype=work_dtype)
+
+    Pp = None
+    if dXXT is not None and alpha != 0.0:
+        dX_p = (dXXT.to(work_dtype).index_select(0, p).index_select(1, p))
+        # P = alpha * (dXXT @ Hinv^T).triu(1) @ Hinv   (GPTAQ Eq. for P)
+        Pp = alpha * torch.triu(dX_p @ Hinv.t(), diagonal=1) @ Hinv
+        del dX_p
 
     for i in range(pin):
         si = sc_p[:, i]; zpi = zp_p[:, i]
-        q = torch.clamp(torch.round(Wp[:, i] / si + zpi), lo, hi)
+        w_pre = Wp[:, i].clone()             # OBS-shifted FP, BEFORE rounding
+        What_p[:, i] = w_pre
+        q = torch.clamp(torch.round(w_pre / si + zpi), lo, hi)
         w_dq = (q - zpi) * si
-        e = Wp[:, i] - w_dq          # GPTQ sign: target - dequant
+        e = w_pre - w_dq             # GPTQ sign: target - dequant
         codes_p[:, i] = q.long()
         if i + 1 < pin:
             denom = Hinv[i, i]
             factor = (Hinv[i, i+1:] / denom).to(work_dtype)         # [pin-i-1]
             Wp[:, i+1:] -= e.unsqueeze(1) * factor.unsqueeze(0)
-            # schur downdate of the remaining inverse block
+            if Pp is not None:
+                Wp[:, i+1:] += w_pre.unsqueeze(1) * Pp[i, i+1:].unsqueeze(0)
             col = Hinv[i+1:, i:i+1]
             row = Hinv[i:i+1, i+1:]
             Hinv[i+1:, i+1:] -= (col @ row) / denom
 
-    # un-permute codes back to original coordinate positions
     codes = torch.empty(C, pin, device=dev, dtype=torch.long)
+    What = torch.empty(C, pin, device=dev, dtype=work_dtype)
     codes.index_copy_(1, p, codes_p)
-    del Hp, Wp, Hinv, codes_p
-    return codes
+    What.index_copy_(1, p, What_p)
+    del Hp, Wp, Hinv, codes_p, What_p, Pp
+    return codes, What
 
 
 class DenseSurrogateGPTQ:
@@ -109,7 +123,7 @@ class DenseSurrogateGPTQ:
         lo, hi = float(state.min_int), float(state.max_int)
 
         order = self._order(D, V)
-        codes = _sequential_condition(Wf, scale, zp, lo, hi, Htilde, order, wdt)
+        codes, _What = _sequential_condition(Wf, scale, zp, lo, hi, Htilde, order, wdt)
 
         out = (codes.to(wdt) - zp) * scale
         if pin > d:
@@ -173,7 +187,7 @@ class DenseGPTQ:
             order = torch.argsort(diagH, descending=True).tolist()
         else:
             order = list(range(pin))
-        codes = _sequential_condition(Wf, scale, zp, lo, hi, H, order, wdt)
+        codes, _What = _sequential_condition(Wf, scale, zp, lo, hi, H, order, wdt)
 
         out = (codes.to(wdt) - zp) * scale
         if pin > d:

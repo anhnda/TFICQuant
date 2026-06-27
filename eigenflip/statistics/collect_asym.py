@@ -146,20 +146,23 @@ class _AsymAcc:
             self._cached = dict(mu_g=mu_g, diag_H=diag_H, diag_Sigma=diag_Sigma,
                                 Sigma=Sigma, U_k=U_k, Lam_k=Lam_k)
         c = self._cached
-        # field = W @ K, with K = Kacc/n = (1/n) ΔA Aᵀ (= GPTAQ dXXT / n).
-        # The encoder multiplies by W; we pass K (input-space, [d_in,d_in]).
+        # field = W K^T, K = Kacc/n = (1/n) A ΔAᵀ  (input-space, [d,d]).
+        # GPTAQ also needs the RAW cross-Gram dXXT = ΔX·Xᵀ = ΔA·Aᵀ = Kacc^T.
         K = (self.Kacc / n) if (with_field and self.have_dx) else None
+        dXXT = (self.Kacc.t().contiguous()) if (with_field and self.have_dx) else None
         if K is not None:
-            nf = (~torch.isfinite(K)).sum().item()
-            if nf:
-                print(f"    [asym] WARN: {nf} non-finite K entries -> zeroed")
-                K = torch.nan_to_num(K, nan=0.0, posinf=0.0, neginf=0.0)
+            for nm, M in (("K", K), ("dXXT", dXXT)):
+                bad = (~torch.isfinite(M)).sum().item()
+                if bad:
+                    print(f"    [asym] WARN: {bad} non-finite {nm} -> zeroed")
+                    M.copy_(torch.nan_to_num(M, nan=0.0, posinf=0.0, neginf=0.0))
             k_rms = K.pow(2).mean().sqrt().item()
             g_rms = c["Sigma"].pow(2).mean().sqrt().item() if c["Sigma"] is not None else float("nan")
             print(f"    [asym] |K|_rms={k_rms:.3e}  |Sigma|_rms={g_rms:.3e}")
         st = LayerStats(d=self.d, mu_hat=james_stein_mean(c["mu_g"]),
                         diag_H=c["diag_H"], diag_Sigma=c["diag_Sigma"],
                         U_k=c["U_k"], Lam_k=c["Lam_k"], eps=eps, F=K,
+                        dXXT=dXXT, n_samples=n,
                         Sigma=c["Sigma"] if keep_sigma else None,
                         backend="gram_asym").build()
         return st

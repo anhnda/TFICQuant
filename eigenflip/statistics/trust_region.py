@@ -39,7 +39,9 @@ class LayerStats:
     # asymmetric-calibration field F = (1/n) X_sc^T (dY)^T, dY = W(X~ - X).
     # Shape [d_in, C] (= [d, out_features]). None => symmetric (TFIC reduces to
     # the standard reconstruction objective). Only the TFIC-A encoder reads it.
-    F: Optional[torch.Tensor] = None          # [d, C] or None
+    F: Optional[torch.Tensor] = None          # [d, C] or None  (cross-Gram K)
+    dXXT: Optional[torch.Tensor] = None       # [d, d] ΔX·Xᵀ (raw sum) for GPTAQ
+    n_samples: int = 0
     # filled by build():
     D: torch.Tensor = field(default=None, repr=False)      # [d] floored residual diag
     V: torch.Tensor = field(default=None, repr=False)      # [d, k+1]

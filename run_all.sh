@@ -10,19 +10,22 @@ LOG_FILE="$LOG_DIR/eigenflip_3bit_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== run started $(date) ==="
 echo "log: $LOG_FILE"
-#none clc eigenflip eigenflip_solve gptq tfic tfic_fast tfica_fast
-# tfica_fast = TFIC-A (asymmetric, GPTAQ-style block-causal). Pass --asym.
-for ENC in  tfica_fast; do
+#none clc eigenflip eigenflip_solve gptq tfic tfic_fast tfica_fast gptaq gptaq_tfic
+# gptaq      = GPTQ + asymmetric calibration (GPTAQ), block-causal. Pass --asym.
+# gptaq_tfic = GPTAQ then TFIC flip mop-up around the OBS-shifted target.
+ASYM_ALPHA=0.25
+for ENC in  gptaq gptaq_tfic; do
   CELL_DIR="$OUTPUT_DIR/rtn_${ENC}"
 
   # layer-batch-size per encoder: Gram-heavy ones need smaller batches / cpu eigh.
-  # tfica_fast runs block-causal (collect_asym) and ignores --layer-batch-size;
-  # --asym switches run_fast.py onto the asymmetric collector.
+  # gptaq / gptaq_tfic / tfica_fast run block-causal (collect_asym) and ignore
+  # --layer-batch-size; --asym switches run_fast.py onto the asymmetric collector.
   case "$ENC" in
     none|clc)                   LBS=16; EXTRA="" ;;
     eigenflip|eigenflip_solve)  LBS=8;  EXTRA="" ;;
     gptq|tfic|tfic_fast)        LBS=4;  EXTRA="--eig-on-cpu" ;;
     tfica_fast)                 LBS=4;  EXTRA="--eig-on-cpu --asym" ;;
+    gptaq|gptaq_tfic)           LBS=4;  EXTRA="--eig-on-cpu --asym --asym-alpha $ASYM_ALPHA" ;;
   esac
 
   echo
