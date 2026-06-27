@@ -79,8 +79,11 @@ class _AsymAcc:
         self.s2 = torch.zeros(d, dtype=torch.float64, device=device)
         self.n = 0
         self.G = torch.zeros(d, d, dtype=torch.float64, device=self.gram_device)
-        self.SF = torch.zeros(d, C, dtype=torch.float64, device=self.gram_device)
-        self.have_dy = False
+        # cross-Gram accumulator  Kacc = sum_t (x~_t - x_t) x_t^T  -> [d_in, d_in]
+        # (= n * K^T with K = (1/n) X (X~ - X)^T). This is GPTAQ's dXXT, in pure
+        # input space -- NO weight multiply. The encoder forms the field W K^T.
+        self.Kacc = torch.zeros(d, d, dtype=torch.float64, device=self.gram_device)
+        self.have_dx = False
         self._cached = None
 
     @torch.no_grad()
@@ -96,15 +99,20 @@ class _AsymAcc:
         del g, xf
 
     @torch.no_grad()
-    def add_field(self, x_tilde, dy):
-        xf = x_tilde.reshape(-1, x_tilde.shape[-1]).float()
-        yf = dy.reshape(-1, dy.shape[-1]).float()
-        if yf.device != xf.device:
-            yf = yf.to(xf.device, non_blocking=True)
-        sf = (xf.t() @ yf).double()                 # [d, C]
-        self.SF += sf.to(self.gram_device)
-        self.have_dy = True
-        del sf, xf, yf
+    def add_cross(self, x_tilde, x_dirty):
+        """Fold the input-space cross-Gram  Kacc += sum_t x_t (x~_t - x_t)^T
+        into Kacc, i.e. A·ΔAᵀ (rows=tokens => xd.t() @ dx). Pure input space,
+        NO weight. Verified: E_asym = Tr[R G Rᵀ] - 2 Tr[R K Wᵀ] with K=Kacc/n,
+        K = (1/n) A ΔAᵀ, and the field shift is W Kᵀ."""
+        xt = x_tilde.reshape(-1, x_tilde.shape[-1]).float()
+        xd = x_dirty.reshape(-1, x_dirty.shape[-1]).float()
+        if xd.device != xt.device:
+            xd = xd.to(xt.device, non_blocking=True)
+        dx = xt - xd                                  # ΔX = X~ - X   [n, d]
+        kk = (xd.t() @ dx).double()                   # A·ΔAᵀ -> [d, d]
+        self.Kacc += kk.to(self.gram_device)
+        self.have_dx = True
+        del kk, dx, xt, xd
 
     @torch.no_grad()
     def to_stats(self, k, eps, keep_sigma, eig_device, with_field):
@@ -138,27 +146,26 @@ class _AsymAcc:
             self._cached = dict(mu_g=mu_g, diag_H=diag_H, diag_Sigma=diag_Sigma,
                                 Sigma=Sigma, U_k=U_k, Lam_k=Lam_k)
         c = self._cached
-        F = (self.SF / n) if (with_field and self.have_dy) else None
-        if F is not None:
-            # guard: a non-finite or exploded field collapses the model. Report
-            # the field-to-Gram magnitude ratio so a runaway F is visible, and
-            # zero out non-finite entries rather than poisoning the encoder.
-            nf = (~torch.isfinite(F)).sum().item()
+        # field = W @ K, with K = Kacc/n = (1/n) ΔA Aᵀ (= GPTAQ dXXT / n).
+        # The encoder multiplies by W; we pass K (input-space, [d_in,d_in]).
+        K = (self.Kacc / n) if (with_field and self.have_dx) else None
+        if K is not None:
+            nf = (~torch.isfinite(K)).sum().item()
             if nf:
-                print(f"    [asym] WARN: {nf} non-finite F entries -> zeroed")
-                F = torch.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
-            f_rms = F.pow(2).mean().sqrt().item()
+                print(f"    [asym] WARN: {nf} non-finite K entries -> zeroed")
+                K = torch.nan_to_num(K, nan=0.0, posinf=0.0, neginf=0.0)
+            k_rms = K.pow(2).mean().sqrt().item()
             g_rms = c["Sigma"].pow(2).mean().sqrt().item() if c["Sigma"] is not None else float("nan")
-            print(f"    [asym] |F|_rms={f_rms:.3e}  |Sigma|_rms={g_rms:.3e}")
+            print(f"    [asym] |K|_rms={k_rms:.3e}  |Sigma|_rms={g_rms:.3e}")
         st = LayerStats(d=self.d, mu_hat=james_stein_mean(c["mu_g"]),
                         diag_H=c["diag_H"], diag_Sigma=c["diag_Sigma"],
-                        U_k=c["U_k"], Lam_k=c["Lam_k"], eps=eps, F=F,
+                        U_k=c["U_k"], Lam_k=c["Lam_k"], eps=eps, F=K,
                         Sigma=c["Sigma"] if keep_sigma else None,
                         backend="gram_asym").build()
         return st
 
     def free(self):
-        self.s1 = self.s2 = self.G = self.SF = self._cached = None
+        self.s1 = self.s2 = self.G = self.Kacc = self._cached = None
 
 
 @torch.no_grad()
@@ -256,22 +263,17 @@ def collect_and_encode_asym(
         for hh in ha:
             hh.remove()
 
-        # ---- (no probe needed): dY = W_fp(X~ - X) uses only the FP weight, so
-        # we can fold F directly in Pass B and quantize once afterwards. ----
-
-        # ---- Pass B: fold the asymmetric field F.
-        # CORRECT GPTAQ definition: dY = W(X~ - X) -- SAME FP weight, the
-        # difference of the CLEAN input X~ and the DIRTY input X. This captures
-        # the upstream accumulated error (what asymmetric calibration is for),
-        # NOT the current layer's own weight quantization (which the TFIC
-        # quadratic term already handles). We forward both streams through the
-        # still-FP block and read each layer's input from each stream.
+        # ---- Pass B: fold the input-space cross-Gram K = ΔX·Xᵀ (GPTAQ dXXT).
+        # We need each layer's CLEAN input X~ and DIRTY input X. The asymmetric
+        # term in E_asym = ||R X - W ΔX||^2 is -2 Tr[R K W^T] with K = (1/n) ΔA Aᵀ;
+        # K is pure input-space (NO weight). The encoder forms the field W K^T.
+        # This replaces the earlier (wrong) W(X~-X) "dY" formulation: GPTAQ keeps
+        # the deviation in input space and lets the OBS update carry the weight.
         cap_clean, cap_dirty = {}, {}
 
         def mk_pre_into(store):
             def pre(_m, args, kwargs):
                 x = args[0] if args else kwargs.get("input")
-                # key by module id since the same module fires in both passes
                 store[id(_m)] = x.detach()
             return pre
 
@@ -282,8 +284,6 @@ def collect_and_encode_asym(
             hs_c = clean[si].to(device)
             block(hs_c, **kw)                        # FP block, clean input -> X~
             cap_dirty.clear()
-            # temporarily swap hooks to capture the dirty input through the SAME
-            # FP block
             del hs_c
             hs_d = dirty[si].to(device)
             for hh in hb_c:
@@ -300,13 +300,7 @@ def collect_and_encode_asym(
                 xd = cap_dirty.get(id(m))            # X  (dirty)
                 if xt is None or xd is None:
                     continue
-                xtf = xt.reshape(-1, xt.shape[-1])
-                xdf = xd.reshape(-1, xd.shape[-1])
-                wfp = fp_weight[n].to(xtf.dtype)
-                dy = (xtf - xdf) @ wfp.t()           # [*, C] = W_fp (X~ - X)
-                # field's left factor is the CLEAN input X~ (paper convention)
-                accs[n].add_field(xt, dy)
-                del xtf, xdf, dy
+                accs[n].add_cross(xt, xd)            # fold ΔX·Xᵀ
             cap_clean.clear()
             cap_dirty.clear()
             del hs_d

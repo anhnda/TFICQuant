@@ -56,7 +56,7 @@ class TFICAEncoder:
                  c_cand: float = 8.0, top_m: int = 32,
                  max_tunnel_rows: int = 512, max_clusters_per_row: int = 50,
                  chunk_cols: int = 256, work_dtype=torch.float32,
-                 field_scale: float = 1.0, guard_ratio: float = 2.0):
+                 field_scale: float = 0.25, guard_ratio: float = 5.0):
         self.alpha = alpha
         self.beta = beta
         self.eta = eta
@@ -104,19 +104,30 @@ class TFICAEncoder:
         C = Wint.shape[0]
         max_int = float(state.max_int)
 
-        # ---- asymmetric field shift.  RGF has RG's layout [C, pin] so it can
-        # be subtracted wherever the symmetric code reads RG.  F is stored as
-        # [d_in, C]; pad rows to pin and transpose. None => symmetric (zeros).
+        # ---- asymmetric field shift.  stats.F now holds the INPUT-SPACE
+        # cross-Gram K = (1/n) ΔA Aᵀ  ([d_in, d_in], = GPTAQ dXXT/n), NOT a
+        # per-row field. The objective is  E_asym = Tr[R G Rᵀ] - 2 Tr[R K Wᵀ],
+        # so the driving-field shift is  W K  (shape [C, pin], same layout as RG):
+        #   ∂E_asym/∂R_ij = 2(RG)_ij - 2 (W K)_ij.
+        # field_scale = alpha (GPTAQ uses 0.25) damps the correction.
         if getattr(stats, "F", None) is not None:
-            F = stats.F.to(device=dev, dtype=wdt)            # [d_in, C]
-            if F.shape[0] < pin:
-                Fp = torch.zeros(pin, C, device=dev, dtype=wdt)
-                Fp[:F.shape[0]] = F
-                F = Fp
-            RGF = F.t().contiguous()                         # [C, pin]
+            K = stats.F.to(device=dev, dtype=wdt)            # [d_in, d_in]
+            d_in = K.shape[0]
+            # Wf is [C, d] (unpadded); pad columns to pin to match K and RG.
+            if Wf.shape[1] < pin:
+                Wfull = torch.zeros(C, pin, device=dev, dtype=wdt)
+                Wfull[:, :Wf.shape[1]] = Wf
+            else:
+                Wfull = Wf
+            if d_in < pin:
+                Kp = torch.zeros(pin, pin, device=dev, dtype=wdt)
+                Kp[:d_in, :d_in] = K
+                K = Kp
+            RGF = (Wfull @ K.t()).contiguous()               # [C, pin] = W Kᵀ
+            #   ∂/∂R_ij Tr[R K Wᵀ] = (W Kᵀ)_ij  (K is NOT symmetric)
             if self.field_scale != 1.0:
                 RGF = RGF * self.field_scale
-            del F
+            del K
             asym = True
         else:
             RGF = torch.zeros(C, pin, device=dev, dtype=wdt)
