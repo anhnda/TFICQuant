@@ -150,11 +150,12 @@ class GPTAQEncoder:
             invperm = torch.argsort(perm)
 
         Hinv, damp = _hessian_inverse(H, self.damp, self.damp_auto_increment)
+        Qint = torch.zeros(C, pin, device=dev, dtype=torch.long)
         if Hinv is None:
             # reference raises; we RTN-fallback this layer to protect the stream.
             print(f"    [gptaq] WARN: Hessian not PD -> RTN fallback this layer")
-            pre = (W / scale + zp)
-            Q = torch.clamp(torch.round(pre), lo, hi)
+            Qint = torch.clamp(torch.round(W / scale + zp), lo, hi).long()
+            Q = (Qint.to(wdt) - zp) * scale          # dequantized
             What = W.clone()
         else:
             P = None
@@ -169,7 +170,8 @@ class GPTAQEncoder:
                 i2 = min(i1 + bs, cols)
                 count = i2 - i1
                 W1 = W[:, i1:i2].clone()
-                Q1 = torch.zeros_like(W1)
+                Q1 = torch.zeros_like(W1)             # DEQUANTIZED q (ref: quantizer.quantize)
+                Qint1 = torch.zeros_like(W1, dtype=torch.long)  # integer codes (for TFIC)
                 What1 = torch.zeros_like(W1)
                 Err1 = torch.zeros_like(W1)
                 Hinv1 = Hinv[i1:i2, i1:i2]
@@ -179,9 +181,12 @@ class GPTAQEncoder:
                     dcol = Hinv1[i, i]
                     si = scale[:, i1 + i]; zpi = zp[:, i1 + i]
                     What1[:, i] = w                         # OBS-shifted pre-round
+                    # ref: q = self.quantizer.quantize(w)  -> DEQUANTIZED value
+                    #      Q1[:, i] = q ;  err1 = (w - q) / d
                     q_int = torch.clamp(torch.round(w / si + zpi), lo, hi)
-                    q = (q_int - zpi) * si                  # dequantized value
-                    Q1[:, i] = q_int
+                    q = (q_int - zpi) * si                  # dequantized value (== ref q)
+                    Q1[:, i] = q                            # store DEQUANTIZED (like ref)
+                    Qint1[:, i] = q_int.long()
                     err1 = (w - q) / dcol
                     upd = err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                     if P1 is not None:
@@ -189,6 +194,7 @@ class GPTAQEncoder:
                     W1[:, i:] -= upd
                     Err1[:, i] = err1
                 Q[:, i1:i2] = Q1
+                Qint[:, i1:i2] = Qint1
                 What[:, i1:i2] = What1
                 upd2 = Err1.matmul(Hinv[i1:i2, i2:])
                 if P is not None:
@@ -198,14 +204,16 @@ class GPTAQEncoder:
             if P is not None:
                 del P
 
-        # un-permute
+        # un-permute (ref: Q = Q[:, invperm])
         if desc:
-            Q = Q[:, invperm]; What = What[:, invperm]
+            Q = Q[:, invperm]; Qint = Qint[:, invperm]
+            What = What[:, invperm]
             scale = scale[:, invperm]; zp = zp[:, invperm]
 
-        out = (Q - zp) * scale
+        # ref returns Q as the DEQUANTIZED weight directly -- NO second dequant.
+        out = Q
         if pin > d:
-            out = out[:, :d]; What = What[:, :d]; Q = Q[:, :d]
+            out = out[:, :d]; What = What[:, :d]; Qint = Qint[:, :d]
 
         # final NaN guard: never let a bad layer poison the dirty stream.
         if not (torch.isfinite(out).all() and torch.isfinite(What).all()):
@@ -213,13 +221,14 @@ class GPTAQEncoder:
             Wf0 = state.float_weights.to(wdt)
             sc0 = state.scale.to(wdt); zp0 = state.zero_point.to(wdt)
             q0 = torch.clamp(torch.round(Wf0 / sc0 + zp0), 0, state.max_int)
+            Qint = q0.long()
             out = (q0 - zp0) * sc0
             What = Wf0
 
         info = {"encoder": self.name, "damp": damp, "alpha": self.alpha,
                 "asymmetric": have_asym,
                 "What": What.to(state.original_dtype),
-                "codes": Q.to(torch.long)}
+                "codes": Qint.to(torch.long)}
         del H
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
