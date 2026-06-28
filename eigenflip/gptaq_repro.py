@@ -385,6 +385,15 @@ def gptaq_quantize_model(model, calib, dev, *, w_bits=3, groupsize=128,
             super().__init__()
             self.module = module
 
+        def __getattr__(self, name):
+            # nn.Module intercepts attribute access; delegate anything we don't
+            # define (e.g. Qwen2's decoder_layer.attention_type) to the wrapped
+            # layer so the parent stack sees a normal decoder layer.
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                return getattr(self.__dict__["_modules"]["module"], name)
+
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["kwargs"][cache["i"]] = {
