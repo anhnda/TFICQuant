@@ -65,23 +65,29 @@ class IntegerQuantizedTensorState:
 
     @classmethod
     @torch.no_grad()
-    @classmethod
-    @torch.no_grad()
     def from_gptq(cls, What: torch.Tensor, scale: torch.Tensor,
                   zero_point: torch.Tensor, max_int: int, group_size: int,
                   in_features: int, padded_in_features: int,
-                  original_dtype) -> "IntegerQuantizedTensorState":
+                  original_dtype, codes=None) -> "IntegerQuantizedTensorState":
         """
         Build a state whose rounding lattice is centred on the OBS-SHIFTED FP
         weight `What` produced by GPTQ/GPTAQ (encoders/gptaq.py), reusing the
-        grid (scale/zero_point) from the RTN/AWQ pass -- the grid is unchanged;
+        grid (scale/zero_point) from the RTN/AWQ pass. The grid is unchanged;
         only the pre-round point moves from W to What. A subsequent TFIC flip
         pass then chooses floor/ceil AROUND What (the GPTAQ target), so the two
         stages compose instead of fighting.
+
+        `codes` (the FINAL GPTAQ codebook) is used directly as the integer state
+        when given, so TFIC starts exactly from GPTAQ's committed quantization
+        rather than from a re-rounding of What (which can differ by +/-1 after
+        desc_act permutation / propagation rounding). pre_round is still What/s+zp
+        so the flip lattice (floor/ceil) is centred on the OBS target.
         """
-        device = What.device
         pre_round = What / scale + zero_point
-        integer = torch.round(pre_round).clamp(0, max_int)
+        if codes is None:
+            integer = torch.round(pre_round).clamp(0, max_int)
+        else:
+            integer = codes.to(torch.long).clamp(0, max_int)
         st = cls(
             float_weights=What, pre_round=pre_round, integer_weights=integer,
             scale=scale, zero_point=zero_point, max_int=int(max_int), min_int=0,

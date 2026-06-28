@@ -49,35 +49,43 @@ class GPTAQTFICEncoder:
 
     @torch.no_grad()
     def apply(self, state: IntegerQuantizedTensorState, stats: LayerStats):
-        # --- stage 1: GPTAQ on the continuous FP weight -> What (OBS-shifted) ---
+        # --- stage 1: GPTAQ on the continuous FP weight -> What + final codes ---
         _out_gptaq, info_g = self.gptaq.apply(state, stats)
         What = info_g["What"].to(state.float_weights.device,
                                  state.float_weights.dtype)
-        # pad What back to padded width if needed (TFIC works in padded space)
+        codes = info_g["codes"].to(state.float_weights.device)
+        # pad What/codes back to padded width if needed (TFIC works in padded space)
         pin = state.padded_in_features
         if What.shape[1] < pin:
             Wp = torch.zeros(What.shape[0], pin, device=What.device,
                              dtype=What.dtype)
             Wp[:, :What.shape[1]] = What
             What = Wp
+            Cp = torch.zeros(codes.shape[0], pin, device=codes.device,
+                             dtype=codes.dtype)
+            Cp[:, :codes.shape[1]] = codes
+            codes = Cp
 
-        # --- build a state whose lattice is centred on What ---
+        # --- build a state centred on What, initialised from GPTAQ's FINAL
+        # codebook (not a re-round of What) so TFIC starts from the committed
+        # GPTAQ quantization and flips around the OBS target. ---
         gptq_state = IntegerQuantizedTensorState.from_gptq(
             What=What, scale=state.scale, zero_point=state.zero_point,
             max_int=state.max_int, group_size=state.group_size,
             in_features=state.in_features,
             padded_in_features=state.padded_in_features,
-            original_dtype=state.original_dtype)
+            original_dtype=state.original_dtype, codes=codes)
 
-        # --- stage 2: TFIC symmetric flip around What (field OFF: asymmetry is
-        # already absorbed by GPTAQ; re-injecting K would double-count). ---
+        # --- stage 2: TFIC symmetric flip around What with the ORIGINAL objective
+        # Tr[R G Rᵀ] (field OFF: asymmetry already absorbed by GPTAQ into What/
+        # codes; re-injecting K would double-count). ---
         out, info_t = self.tfic.apply(gptq_state, stats)
         info = {"encoder": self.name, "asymmetric": info_g.get("asymmetric"),
                 "alpha": info_g.get("alpha"),
                 "gptaq": {kk: vv for kk, vv in info_g.items()
                           if kk not in ("What", "codes")},
                 "tfic": info_t}
-        del What, gptq_state
+        del What, codes, gptq_state
         return out, info
 
 

@@ -28,8 +28,59 @@ from ..statistics.trust_region import LayerStats
 
 
 @torch.no_grad()
+def _robust_hinv(H, damp_percent=0.01, damp_auto_increment=0.0015):
+    """Inverse-Hessian exactly as GPTQModel's hessian_inverse: scalar damping
+    (damp_percent * mean(diag)), Cholesky-based inverse, auto-increment of damp
+    on Cholesky failure, and a relative diagonal floor for singular blocks.
+    Returns the FULL inverse H^{-1} (we run a dense reference, not the running
+    Cholesky-factor downdate, so we want the explicit inverse).
+
+    This replaces a naive torch.linalg.inv, which produces inf/NaN on the
+    ill-conditioned deep-layer Hessians (observed: dirty stream -> NaN).
+    """
+    import math
+    H = H.clone()
+    diag_view = H.diagonal()
+    orig_diag = diag_view.clone()
+    base_abs_max = torch.max(orig_diag.abs()).item()
+    if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
+        base_abs_max = 1.0
+    floor_base = base_abs_max * 1e-6
+    max_floor_attempts = 6
+
+    attempt = 0
+    while attempt <= max_floor_attempts:
+        if attempt == 0:
+            current_diag = orig_diag
+        else:
+            inc = floor_base * (10.0 ** (attempt - 1))
+            current_diag = torch.clamp(orig_diag + inc, min=inc)
+        diag_view.copy_(current_diag)
+        mean = torch.mean(current_diag)
+        damp = damp_percent
+        while 0 < damp < 1:
+            try:
+                diag_view.add_(damp * mean)
+                L = torch.linalg.cholesky(H)
+                Hinv = torch.cholesky_inverse(L)          # full H^{-1}
+                diag_view.copy_(current_diag)
+                del L
+                return Hinv
+            except Exception:
+                diag_view.copy_(current_diag)
+                if damp_auto_increment != 0:
+                    damp += damp_auto_increment
+                else:
+                    break
+        attempt += 1
+    # last resort: heavy diagonal load so inv is at least finite
+    diag_view.copy_(orig_diag + (floor_base * 1e3))
+    return torch.linalg.inv(H)
+
+
+@torch.no_grad()
 def _sequential_condition(Wf, scale, zp, lo, hi, Hmat, order, work_dtype,
-                         dXXT=None, alpha=0.0):
+                         dXXT=None, alpha=0.0, damp_percent=0.01):
     """
     GPTQ sequential conditioning under a dense quadratic Hmat, matching the
     coordinate order. Returns (codes [C,pin], What [C,pin]).
@@ -57,7 +108,7 @@ def _sequential_condition(Wf, scale, zp, lo, hi, Hmat, order, work_dtype,
     Wp = Wf.index_select(1, p).clone()                     # [C, pin]
     sc_p = scale.index_select(1, p)                        # [C, pin]
     zp_p = zp.index_select(1, p)
-    Hinv = torch.linalg.inv(Hp)
+    Hinv = _robust_hinv(Hp, damp_percent=damp_percent)     # GPTQModel-style
     codes_p = torch.empty(C, pin, device=dev, dtype=torch.long)
     What_p = torch.empty(C, pin, device=dev, dtype=work_dtype)
 
