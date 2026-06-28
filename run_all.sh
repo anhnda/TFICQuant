@@ -14,7 +14,7 @@ echo "log: $LOG_FILE"
 # gptaq      = GPTQ + asymmetric calibration (GPTAQ), block-causal. Pass --asym.
 # gptaq_tfic = GPTAQ then TFIC flip mop-up around the OBS-shifted target.
 ASYM_ALPHA=0.25
-for ENC in  gptaq; do
+for ENC in  tfic_fast; do
   CELL_DIR="$OUTPUT_DIR/rtn_${ENC}"
 
   # layer-batch-size per encoder: Gram-heavy ones need smaller batches / cpu eigh.
