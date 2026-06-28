@@ -256,10 +256,12 @@ def collect_and_encode_asym(
             kw = _to_dev(kwargs_list[si], device)
             out = block(hs, **kw)
             out_hs = out[0] if isinstance(out, tuple) else out
-            for n, _m in lin:
-                xt = cap_in.get(n)
-                if xt is not None:
-                    accs[n].add_gram(xt)
+            # NOTE: GPTAQ builds H from the DIRTY (deployed) input X, not the
+            # clean X~. We therefore do NOT fold the Gram here; H is folded in
+            # Pass B from the dirty stream (xd) so that Hinv matches the same
+            # input distribution as dXXT = (X~-X) X^T. Folding H on X~ here made
+            # Hinv mismatch the exploded dirty channels, blowing up
+            # P = alpha (dXXT Hinv^T).triu Hinv -> non-finite -> RTN fallback.
             clean_out.append(out_hs.detach().to("cpu"))
             cap_in.clear()
             del hs, out, out_hs
@@ -303,6 +305,7 @@ def collect_and_encode_asym(
                 xd = cap_dirty.get(id(m))            # X  (dirty)
                 if xt is None or xd is None:
                     continue
+                accs[n].add_gram(xd)                 # H from DIRTY X (GPTAQ)
                 accs[n].add_cross(xt, xd)            # fold ΔX·Xᵀ
             cap_clean.clear()
             cap_dirty.clear()
@@ -347,4 +350,3 @@ def collect_and_encode_asym(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print(f"  block {bi+1} done")
-
