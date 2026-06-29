@@ -81,3 +81,21 @@ Wrote ./quantized_models/eigenflip_3bit/rtn_tfic_fast/ppl.json
 
 === all cells done Mon Jun 29 05:32:33 AM UTC 2026 ===
 preserved ppl files: ./quantized_models/eigenflip_3bit/rtn_*_ppl.json
+
+
+llama 3.1
+[wikitext2] building test stream ...                                                                                                                                                                               
+[wikitext2] perplexity = 8.3946                                                                                                                                                                                    
+                                                                                                                                                                                                                   
+[c4] building test stream ...                                                                                                                                                                                      
+  [c4] cached windows -> ./dataset_cache/c4_testenc_2b2df7f0e84e.pt                                                                                                                                                
+[c4] perplexity = 11.0672                                                                                                                                                                                          
+                                                                                                                                                                                                                   
+SUMMARY  rtn_tfic_fast  wikitext2=8.3946 | c4=11.0672      
+
+SUMMARY  rtn_gptaq  wikitext2=7.9833 | c4=10.6034
+Wrote ./quantized_models/gptaq_llama_3bit/rtn_gptaq/ppl.json
+>>> [2.5] preserving ppl.json
+    ./quantized_models/gptaq_llama_3bit/rtn_gptaq_ppl.json
+>>> [3/3] deleting ./quantized_models/gptaq_llama_3bit/rtn_gptaq
+<<< done rtn+gptaq

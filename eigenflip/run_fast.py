@@ -128,7 +128,11 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path, dtype=torch.bfloat16, device_map="auto",
         trust_remote_code=True).eval()
-
+    emb_rows = model.get_input_embeddings().num_embeddings
+    if len(tok) > emb_rows:
+        print(f"[fix] resizing embeddings {emb_rows} -> {len(tok)} to match tokenizer")
+        model.resize_token_embeddings(len(tok))
+        model.eval()
     if get_c4_calibration_data is None:
         raise RuntimeError("calibration_utils.py not importable")
     if args.calib_dataset == "c4":
