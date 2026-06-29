@@ -64,9 +64,20 @@ Wrote ./quantized_models/eigenflip_3bit/rtn_tfica_fast/ppl.json
 >>> [3/3] deleting ./quantized_models/eigenflip_3bit/rtn_tfica_fast
 <<< done rtn+tfica_fast
 
-PYTHONPATH=. python eigenflip/run_gptaq.py \
-  --model-path "$MODEL_PATH" --output-dir ./quantized_models/gptaq_3bit \
-  --bits 3 --group-size 128 --asym-alpha 0.25 \
-  --calib-dataset c4 --n-calib 128 --seqlen 2048 \
-  --eval --eval-datasets wikitext2 c4 --eval-seqlen 2048 \
-  --delete-after-eval
+
+SUMMARY  rtn_gptaq  wikitext2=9.6514 | c4=12.8856
+Wrote ./quantized_models/gptaq_3bit/rtn_gptaq/ppl.json
+>>> [2.5] preserving ppl.json
+    ./quantized_models/gptaq_3bit/rtn_gptaq_ppl.json
+>>> [3/3] deleting ./quantized_models/gptaq_3bit/rtn_gptaq
+<<< done rtn+gptaq
+
+
+SUMMARY  rtn_tfic_fast  wikitext2=9.0697 | c4=12.4547
+Wrote ./quantized_models/eigenflip_3bit/rtn_tfic_fast/ppl.json
+>>> [2.5] preserving ppl.json
+>>> [3/3] deleting ./quantized_models/eigenflip_3bit/rtn_tfic_fast
+<<< done rtn+tfic_fast
+
+=== all cells done Mon Jun 29 05:32:33 AM UTC 2026 ===
+preserved ppl files: ./quantized_models/eigenflip_3bit/rtn_*_ppl.json
