@@ -116,3 +116,20 @@ Wrote ./quantized_models/gptaq_mistral_3bit/rtn_gptaq/ppl.json
     ./quantized_models/gptaq_mistral_3bit/rtn_gptaq_ppl.json
 >>> [3/3] deleting ./quantized_models/gptaq_mistral_3bit/rtn_gptaq
 <<< done rtn+gptaq
+
+
+
+Llama 3
+
+SUMMARY  rtn_tfic_fast  wikitext2=8.5877 | c4=11.1894                                                                                                                                                              
+Wrote ./quantized_models/eigenflip_llama3_3bit/rtn_tfic_fast/ppl.json                                                                                                                                              
+>>> [2.5] preserving ppl.json                                                                                                                                                                                      
+>>> [3/3] deleting ./quantized_models/eigenflip_llama3_3bit/rtn_tfic_fast                                                                                                                                          
+<<< done rtn+tfic_fast 
+
+SUMMARY  rtn_gptaq  wikitext2=9.3303 | c4=11.1313
+Wrote ./quantized_models/gptaq_llama3_3bit/rtn_gptaq/ppl.json
+>>> [2.5] preserving ppl.json
+    ./quantized_models/gptaq_llama3_3bit/rtn_gptaq_ppl.json
+>>> [3/3] deleting ./quantized_models/gptaq_llama3_3bit/rtn_gptaq
+<<< done rtn+gptaq
