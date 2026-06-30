@@ -64,14 +64,7 @@ Wrote ./quantized_models/eigenflip_3bit/rtn_tfica_fast/ppl.json
 >>> [3/3] deleting ./quantized_models/eigenflip_3bit/rtn_tfica_fast
 <<< done rtn+tfica_fast
 
-
-SUMMARY  rtn_gptaq  wikitext2=9.6514 | c4=12.8856
-Wrote ./quantized_models/gptaq_3bit/rtn_gptaq/ppl.json
->>> [2.5] preserving ppl.json
-    ./quantized_models/gptaq_3bit/rtn_gptaq_ppl.json
->>> [3/3] deleting ./quantized_models/gptaq_3bit/rtn_gptaq
-<<< done rtn+gptaq
-
+Qwen 2.5
 
 SUMMARY  rtn_tfic_fast  wikitext2=9.0697 | c4=12.4547
 Wrote ./quantized_models/eigenflip_3bit/rtn_tfic_fast/ppl.json
@@ -81,6 +74,14 @@ Wrote ./quantized_models/eigenflip_3bit/rtn_tfic_fast/ppl.json
 
 === all cells done Mon Jun 29 05:32:33 AM UTC 2026 ===
 preserved ppl files: ./quantized_models/eigenflip_3bit/rtn_*_ppl.json
+
+
+SUMMARY  rtn_gptaq  wikitext2=9.6514 | c4=12.8856
+Wrote ./quantized_models/gptaq_3bit/rtn_gptaq/ppl.json
+>>> [2.5] preserving ppl.json
+    ./quantized_models/gptaq_3bit/rtn_gptaq_ppl.json
+>>> [3/3] deleting ./quantized_models/gptaq_3bit/rtn_gptaq
+<<< done rtn+gptaq
 
 
 llama 3.1
@@ -98,4 +99,20 @@ Wrote ./quantized_models/gptaq_llama_3bit/rtn_gptaq/ppl.json
 >>> [2.5] preserving ppl.json
     ./quantized_models/gptaq_llama_3bit/rtn_gptaq_ppl.json
 >>> [3/3] deleting ./quantized_models/gptaq_llama_3bit/rtn_gptaq
+<<< done rtn+gptaq
+
+
+Mistral 7B
+
+SUMMARY  rtn_tfic_fast  wikitext2=6.0997 | c4=8.7590                                                                                                                 
+Wrote ./quantized_models/eigenflip_llama_3bit/rtn_tfic_fast/ppl.json                                                                                                 
+>>> [2.5] preserving ppl.json                                                                                                                                        
+>>> [3/3] deleting ./quantized_models/eigenflip_llama_3bit/rtn_tfic_fast                                                                                             
+<<< done rtn+tfic_fast                                                                                                                                               
+                          
+SUMMARY  rtn_gptaq  wikitext2=6.2402 | c4=9.3216
+Wrote ./quantized_models/gptaq_mistral_3bit/rtn_gptaq/ppl.json
+>>> [2.5] preserving ppl.json
+    ./quantized_models/gptaq_mistral_3bit/rtn_gptaq_ppl.json
+>>> [3/3] deleting ./quantized_models/gptaq_mistral_3bit/rtn_gptaq
 <<< done rtn+gptaq
