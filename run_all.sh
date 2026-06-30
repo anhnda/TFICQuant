@@ -11,9 +11,7 @@ LOG_FILE="$LOG_DIR/eigenflip_3bit_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=== run started $(date) ==="
 echo "log: $LOG_FILE"
-#none clc eigenflip eigenflip_solve gptq tfic tfic_fast tfica_fast gptaq gptaq_tfic
-# gptaq      = GPTQ + asymmetric calibration (GPTAQ), block-causal. Pass --asym.
-# gptaq_tfic = GPTAQ then TFIC flip mop-up around the OBS-shifted target.
+#none clc eigenflip eigenflip_solve gptq tfic tfic_fast tfica_fast.
 ASYM_ALPHA=0.25
 for ENC in  tfic_fast; do
   CELL_DIR="$OUTPUT_DIR/rtn_${ENC}"
@@ -25,8 +23,6 @@ for ENC in  tfic_fast; do
     none|clc)                   LBS=16; EXTRA="" ;;
     eigenflip|eigenflip_solve)  LBS=8;  EXTRA="" ;;
     gptq|tfic|tfic_fast)        LBS=4;  EXTRA="--eig-on-cpu" ;;
-    tfica_fast)                 LBS=4;  EXTRA="--eig-on-cpu --asym" ;;
-    gptaq|gptaq_tfic)           LBS=4;  EXTRA="--eig-on-cpu --asym --asym-alpha $ASYM_ALPHA" ;;
   esac
 
   echo
